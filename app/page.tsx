@@ -63,3 +63,15 @@ export default function Home() {
     </div>
   );
 }
+
+import LoginBtn from "@/components/LoginBtn";
+
+export default function Home() {
+  return (
+    <div>
+      <h1>Welcome</h1>
+      <LoginBtn />
+    </div>
+  );
+}
+
