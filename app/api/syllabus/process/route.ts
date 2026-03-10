@@ -1,11 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { generateText } from 'ai';
 import { gateway } from 'ai';
-import { auth } from '@/app/utils/auth';
-import { headers } from 'next/headers';
-import { db } from '@/src/db/client';
-import { event } from '@/src/db/schema';
-import crypto from 'crypto';
 import type { ExtractedEvent } from '@/app/utils/ocrProcessor';
 
 function parseCSVResponse(csvText: string): ExtractedEvent[] {
@@ -43,17 +38,6 @@ function parseCSVResponse(csvText: string): ExtractedEvent[] {
 
 export async function POST(request: NextRequest) {
   try {
-    const session = await auth.api.getSession({
-      headers: await headers(),
-    });
-
-    if (!session?.user?.id) {
-      return NextResponse.json(
-        { error: 'Unauthorized' },
-        { status: 401 }
-      );
-    }
-
     const formData = await request.formData();
     const file = formData.get('file');
 
@@ -105,19 +89,7 @@ Return only the CSV, no other text.`;
 
     const events = parseCSVResponse(text);
 
-    // Insert events into the database
-    if (events.length > 0) {
-      await db.insert(event).values(
-        events.map((e) => ({
-          id: crypto.randomUUID(),
-          date: e.date,
-          time: e.time ?? null,
-          description: e.description,
-          subject: e.subject,
-          userId: session.user.id,
-        }))
-      );
-    }
+    // TODO: re-add DB insert once auth is wired up
 
     return NextResponse.json({ events });
   } catch (error) {

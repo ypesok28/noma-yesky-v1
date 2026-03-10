@@ -1,12 +1,9 @@
 import type { ExtractedEvent } from './ocrProcessor';
 
-// Get Ollama URL from environment (works on both client and server)
 const getOllamaUrl = () => {
   if (typeof window !== 'undefined') {
-    // Client-side: use NEXT_PUBLIC env var
     return process.env.NEXT_PUBLIC_OLLAMA_URL || 'http://localhost:11434';
   }
-  // Server-side: can use regular env var or NEXT_PUBLIC
   return process.env.OLLAMA_URL || process.env.NEXT_PUBLIC_OLLAMA_URL || 'http://localhost:11434';
 };
 
@@ -14,41 +11,66 @@ const getOllamaModel = () => {
   return process.env.OLLAMA_MODEL || process.env.NEXT_PUBLIC_OLLAMA_MODEL || 'llama3.2';
 };
 
+function parseCSVResponse(csvText: string): ExtractedEvent[] {
+  const lines = csvText.trim().split('\n');
+  // Skip the header row
+  const dataLines = lines.length > 1 ? lines.slice(1) : lines;
+
+  return dataLines
+    .filter((line) => line.trim().length > 0)
+    .map((line) => {
+      // Parse CSV respecting quoted fields
+      const fields: string[] = [];
+      let current = '';
+      let inQuotes = false;
+      for (const char of line) {
+        if (char === '"') {
+          inQuotes = !inQuotes;
+        } else if (char === ',' && !inQuotes) {
+          fields.push(current.trim());
+          current = '';
+        } else {
+          current += char;
+        }
+      }
+      fields.push(current.trim());
+
+      const [date, time, description, subject] = fields;
+      return {
+        date: date || '',
+        time: time || undefined,
+        description: description || 'Event',
+        subject: subject || 'Unknown Subject',
+      };
+    })
+    .filter((e) => e.date.length > 0);
+}
+
 /**
- * Send raw OCR text to Ollama LLM and get structured JSON response
+ * Send raw OCR text to Ollama LLM and get CSV response, parsed into events
  */
 export async function processWithOllama(rawText: string): Promise<ExtractedEvent[]> {
   try {
-    const prompt = `You are a helpful assistant that extracts calendar events from syllabus text. 
-Analyze the following text extracted from a syllabus document and extract all important dates, assignments, exams, and events.
+    const prompt = `You are a helpful assistant that extracts calendar events from syllabus text.
+Analyze the following text and extract all important dates, assignments, exams, and events.
 
-Extract the following information for each event:
-- date: The date in ISO format (YYYY-MM-DD)
-- time: The time if mentioned (HH:MM format or "3:00 PM" format)
-- description: A clear description of the event (e.g., "Midterm Exam", "Assignment 1 Due", "Project Presentation")
-- subject: The course name or code (e.g., "CS 101", "MATH 200", "Introduction to Computer Science")
+Return ONLY a CSV with these columns: date,time,description,subject
+- date: YYYY-MM-DD format
+- time: time if mentioned (e.g. "3:00 PM"), leave empty if not mentioned
+- description: what the event is (e.g. "Midterm Exam")
+- subject: course name or code (e.g. "CS 101")
 
-Return ONLY a valid JSON array of events in this exact format:
-[
-  {
-    "date": "2024-01-15",
-    "time": "3:00 PM",
-    "description": "Midterm Exam",
-    "subject": "CS 101"
-  },
-  {
-    "date": "2024-02-20",
-    "description": "Final Project Due",
-    "subject": "CS 101"
-  }
-]
+Example output:
+date,time,description,subject
+2024-01-15,3:00 PM,Midterm Exam,CS 101
+2024-02-20,,Final Project Due,CS 101
 
-If no time is mentioned, omit the "time" field. If no subject/course is found, use "Unknown Subject" or use context clues to determine a general subject an example could be "Computer Science" or "Math".
+If a field contains commas, wrap it in double quotes. If no subject is found, use context clues or "Unknown Subject".
 
 Text to analyze:
 ${rawText}
 
-Return only the JSON array, no other text:`;
+Return only the CSV, no other text:`;
 
     const ollamaUrl = getOllamaUrl();
     const model = getOllamaModel();
@@ -62,7 +84,6 @@ Return only the JSON array, no other text:`;
         model: model,
         prompt: prompt,
         stream: false,
-        format: 'json',
       }),
     });
 
@@ -71,40 +92,14 @@ Return only the JSON array, no other text:`;
     }
 
     const data = await response.json();
-    
-    // Extract JSON from response
-    let jsonText = data.response || data.text || '';
-    
-    // Clean up the response - remove markdown code blocks if present
-    jsonText = jsonText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    
-    // Try to extract JSON array from the response
-    const jsonMatch = jsonText.match(/\[[\s\S]*\]/);
-    if (jsonMatch) {
-      jsonText = jsonMatch[0];
-    }
 
-    const events: ExtractedEvent[] = JSON.parse(jsonText);
-    
-    // Validate and clean the events
-    return events.map((event) => ({
-      date: event.date || '',
-      time: event.time,
-      description: event.description || 'Event',
-      subject: event.subject || 'Unknown Subject',
-    }));
+    let csvText = data.response || data.text || '';
+    // Clean up markdown code blocks if present
+    csvText = csvText.replace(/```csv\n?/g, '').replace(/```\n?/g, '').trim();
+
+    return parseCSVResponse(csvText);
   } catch (error) {
     console.error('Ollama processing error:', error);
     throw new Error(`Failed to process text with Ollama: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
-}
-
-/**
- * Combined function: Process OCR text and then send to Ollama for structured extraction
- */
-export async function processOCRWithOllama(rawText: string): Promise<ExtractedEvent[]> {
-  console.log('Sending to Ollama for processing...');
-  const events = await processWithOllama(rawText);
-  console.log(`Ollama extracted ${events.length} events`);
-  return events;
 }
