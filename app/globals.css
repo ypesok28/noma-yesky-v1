@@ -123,3 +123,9 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* Use a cleaner, more modern system font stack instead of Geist */
+body {
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "Segoe UI", sans-serif;
+}

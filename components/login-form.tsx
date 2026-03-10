@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 
-import { authClient } from "@/app/utils/auth-client";
+import { supabase } from "@/app/utils/supabaseClient";
 import { useRouter } from "next/navigation";
 
 export function LoginForm() {
@@ -25,8 +25,7 @@ export function LoginForm() {
       if (isSignUp) {
         await handleSignup();
       } else {
-        // TODO: call authClient.signIn.email here
-        await new Promise((resolve) => setTimeout(resolve, 2000));
+        await handleSignin();
       }
     } finally {
       setIsLoading(false);
@@ -38,67 +37,108 @@ export function LoginForm() {
   const [name, setName] = useState("");
 
   async function handleSignup() {
-    const { data, error } = await authClient.signUp.email(
-      {
+    try {
+      // Check if Supabase is configured
+      if (!supabase) {
+        alert("Supabase is not configured. Please check your environment variables.");
+        return;
+      }
+
+      const { data, error } = await supabase.auth.signUp({
         email,
         password,
-        name,
-        callbackURL: "/dashboard",
+        options: {
+          data: {
+            full_name: name,
+          },
+          emailRedirectTo: typeof window !== 'undefined' ? `${window.location.origin}/dashboard` : undefined,
       },
-      {
-        onRequest: () => {
-          setIsLoading(true);
-        },
-        onSuccess: () => {
-          setIsLoading(false);
-          // Redirect to dashboard or show a message
-          router.push("/dashboard");
-        },
-        onError: (ctx) => {
-          setIsLoading(false);
-          alert(ctx.error.message);
-        },
+      });
+
+      if (error) {
+        alert(error.message);
+        return;
       }
-    );
+
+      if (data.user) {
+        // Check if email confirmation is required
+        if (data.user.email_confirmed_at) {
+          // User is automatically signed in
+          router.push("/dashboard");
+        } else {
+          // Email confirmation required
+          alert("Please check your email to confirm your account!");
+        }
+      }
+    } catch (error: any) {
+      console.error("Signup error:", error);
+      alert(error?.message || "An error occurred during signup. Check console for details.");
+    }
   }
 
   async function handleSignin() {
-    const { data, error } = await authClient.signIn.email(
-      {
+    try {
+      // Check if Supabase is configured
+      if (!supabase) {
+        alert("Supabase is not configured. Please check your environment variables.");
+        return;
+      }
+
+      const { data, error } = await supabase.auth.signInWithPassword({
         email,
         password,
-        callbackURL: "/dashboard",
-      },
-      {
-        onRequest: () => {
-          setIsLoading(true);
-        },
-        onSuccess: () => {
-          setIsLoading(false);
-          router.push("/dashboard");
-        },
-        onError: (ctx) => {
-          setIsLoading(false);
-          alert(ctx.error.message);
-        },
+      });
+
+      if (error) {
+        alert(error.message);
+        return;
       }
-    );
+
+      if (data.user) {
+          router.push("/dashboard");
+      }
+    } catch (error: any) {
+      console.error("Signin error:", error);
+      alert(error?.message || "An error occurred during sign in. Check console for details.");
+    }
+  }
+
+  async function signInWithOAuth(provider: 'google') {
+    try {
+      // Check if Supabase is configured
+      if (!supabase) {
+        alert("Supabase is not configured. Please check your environment variables.");
+        return;
+      }
+
+      const { data, error } = await supabase.auth.signInWithOAuth({
+        provider: provider,
+        options: {
+          redirectTo: typeof window !== 'undefined' ? `${window.location.origin}/dashboard` : undefined,
+        },
+      });
+
+      if (error) {
+        alert(error.message);
+        return;
+      }
+
+      // signInWithOAuth automatically redirects, so we don't need to manually navigate
+      // The redirectTo option handles where the user goes after authentication
+    } catch (error: any) {
+      console.error("OAuth signin error:", error);
+      alert(error?.message || "An error occurred during OAuth signin. Check console for details.");
+    }
   }
 
   return (
     <div className="space-y-8">
-      {/* Mobile logo */}
-      <div className="flex items-center gap-2 lg:hidden">
-        <div className="w-8 h-8 bg-foreground rounded-md" />
-        <span className="text-xl font-semibold">Acme</span>
-      </div>
-
       {/* Header */}
-      <div className="space-y-2">
-        <h2 className="text-3xl font-bold tracking-tight">
+      <div className="space-y-2 text-center">
+        <h2 className="text-4xl md:text-5xl font-bold text-gray-900">
           {isSignUp ? "Create your account" : "Sign in to your account"}
         </h2>
-        <p className="text-muted-foreground">
+        <p className="text-lg text-gray-600">
           {isSignUp
             ? "Get started with your free account today"
             : "Enter your credentials to access your workspace"}
@@ -146,7 +186,7 @@ export function LoginForm() {
               {!isSignUp && (
                 <a
                   href="#"
-                  className="text-sm text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-ring rounded"
+                  className="text-sm text-blue-600 hover:text-blue-700 hover:underline focus:outline-none focus:ring-2 focus:ring-blue-500 rounded transition-colors"
                 >
                   Forgot password?
                 </a>
@@ -198,14 +238,14 @@ export function LoginForm() {
             <Checkbox id="terms" required />
             <Label
               htmlFor="terms"
-              className="text-sm font-normal cursor-pointer leading-relaxed"
+              className="text-sm font-normal cursor-pointer leading-relaxed text-gray-700"
             >
               I agree to the{" "}
-              <a href="#" className="text-accent hover:underline">
+              <a href="#" className="text-blue-600 hover:text-blue-700 hover:underline">
                 Terms of Service
               </a>{" "}
               and{" "}
-              <a href="#" className="text-accent hover:underline">
+              <a href="#" className="text-blue-600 hover:text-blue-700 hover:underline">
                 Privacy Policy
               </a>
             </Label>
@@ -214,7 +254,7 @@ export function LoginForm() {
 
         <Button
           type="submit"
-          className="w-full h-11 font-medium"
+          className="w-full h-12 bg-blue-600 text-white hover:bg-blue-700 font-semibold text-lg rounded-xl shadow-lg hover:shadow-xl transition-all duration-200 active:scale-95"
           disabled={isLoading}
         >
           {isLoading
@@ -229,10 +269,10 @@ export function LoginForm() {
         {/* Divider */}
         <div className="relative">
           <div className="absolute inset-0 flex items-center">
-            <span className="w-full border-t border-border" />
+            <span className="w-full border-t border-blue-200" />
           </div>
           <div className="relative flex justify-center text-xs uppercase">
-            <span className="bg-background px-2 text-muted-foreground">
+            <span className="bg-white px-2 text-gray-500">
               Or continue with
             </span>
           </div>
@@ -244,7 +284,8 @@ export function LoginForm() {
             type="button"
             variant="outline"
             disabled={isLoading}
-            className="h-11 bg-transparent"
+            onClick={() => signInWithOAuth('google')}
+            className="h-12 bg-white border-2 border-blue-200 text-gray-700 hover:bg-blue-50 hover:border-blue-300 transition-all duration-200 rounded-xl"
           >
             <svg className="mr-2 h-4 w-4" viewBox="0 0 24 24">
               <path
@@ -270,7 +311,7 @@ export function LoginForm() {
             type="button"
             variant="outline"
             disabled={isLoading}
-            className="h-11 bg-transparent"
+            className="h-12 bg-white border-2 border-blue-200 text-gray-700 hover:bg-blue-50 hover:border-blue-300 transition-all duration-200 rounded-xl"
           >
             <svg
               className="mr-2 h-4 w-4"
@@ -284,12 +325,12 @@ export function LoginForm() {
         </div>
       </form>
 
-      <p className="text-center text-sm text-muted-foreground">
+      <p className="text-center text-sm text-gray-600">
         {isSignUp ? "Already have an account?" : "Don't have an account?"}{" "}
         <button
           type="button"
           onClick={() => setIsSignUp(!isSignUp)}
-          className="text-accent hover:underline font-medium focus:outline-none focus:ring-2 focus:ring-ring rounded"
+          className="text-blue-600 hover:text-blue-700 hover:underline font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500 rounded transition-colors"
         >
           {isSignUp ? "Sign in" : "Sign up"}
         </button>

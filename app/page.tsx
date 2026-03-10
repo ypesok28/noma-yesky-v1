@@ -1,5 +1,5 @@
-import CalendarPage from "./pages/calendarPage";
+import Homepage from "./pages/homepage";
 
 export default function Page() {
-  return <CalendarPage />;
+  return <Homepage />;
 }
