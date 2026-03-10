@@ -14,12 +14,11 @@ export interface RawOCRData {
 
 /**
  * Process an image file and extract raw text using OCR
- * Returns only the raw text - no parsing or structure
  */
 export async function extractTextFromImage(file: File): Promise<string> {
   try {
     const { data: { text } } = await Tesseract.recognize(file, 'eng', {
-      logger: (m: any) => {
+      logger: (m: { status: string; progress: number }) => {
         if (m.status === 'recognizing text') {
           console.log(`OCR Progress: ${Math.round(m.progress * 100)}%`);
         }
@@ -33,14 +32,12 @@ export async function extractTextFromImage(file: File): Promise<string> {
 }
 
 /**
- * Process a file (image) and extract raw text only
+ * Process an image file and extract raw text
  */
 export async function processSyllabusFile(file: File): Promise<RawOCRData> {
   console.log('Starting OCR processing...');
-  const ocrText = await extractTextFromImage(file);
-  console.log('OCR Text extracted:', ocrText.substring(0, 200));
-  
-  return {
-    rawText: ocrText,
-  };
+  const rawText = await extractTextFromImage(file);
+  console.log('OCR Text extracted:', rawText.substring(0, 200));
+
+  return { rawText };
 }

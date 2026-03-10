@@ -73,6 +73,22 @@ export const verification = pgTable(
   (table) => [index("verification_identifier_idx").on(table.identifier)],
 );
 
+export const event = pgTable(
+  "event",
+  {
+    id: text("id").primaryKey(),
+    date: text("date").notNull(),
+    time: text("time"),
+    description: text("description").notNull(),
+    subject: text("subject").notNull(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [index("event_userId_idx").on(table.userId)],
+);
+
 export const emailVerificationCodes = pgTable("email_verification_codes", {
   id: serial("id").primaryKey(),
   userId: uuid("user_id").notNull(),
@@ -81,9 +97,17 @@ export const emailVerificationCodes = pgTable("email_verification_codes", {
   used: boolean("used").default(false),
 });
 
+export const eventRelations = relations(event, ({ one }) => ({
+  user: one(user, {
+    fields: [event.userId],
+    references: [user.id],
+  }),
+}));
+
 export const userRelations = relations(user, ({ many }) => ({
   sessions: many(session),
   accounts: many(account),
+  events: many(event),
 }));
 
 export const sessionRelations = relations(session, ({ one }) => ({

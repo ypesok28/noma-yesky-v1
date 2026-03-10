@@ -2,41 +2,82 @@
 
 import { useState, useRef } from "react";
 import { Button } from "@/components/ui/button";
-import { processSyllabusFile } from "@/app/utils/ocrProcessor";
 import type { ExtractedEvent } from "@/app/utils/ocrProcessor";
+
+function buildGoogleCalendarUrl(event: ExtractedEvent): string {
+  const { date, time, description, subject } = event;
+
+  // Build start datetime
+  let startDate: Date;
+  if (time) {
+    startDate = new Date(`${date} ${time}`);
+  } else {
+    startDate = new Date(date);
+  }
+
+  // Format as YYYYMMDD or YYYYMMDDTHHmmss
+  const pad = (n: number) => n.toString().padStart(2, "0");
+  if (time && !isNaN(startDate.getTime())) {
+    const y = startDate.getFullYear();
+    const m = pad(startDate.getMonth() + 1);
+    const d = pad(startDate.getDate());
+    const h = pad(startDate.getHours());
+    const min = pad(startDate.getMinutes());
+    const start = `${y}${m}${d}T${h}${min}00`;
+    // Default 1 hour duration
+    const endDate = new Date(startDate.getTime() + 60 * 60 * 1000);
+    const ey = endDate.getFullYear();
+    const em = pad(endDate.getMonth() + 1);
+    const ed = pad(endDate.getDate());
+    const eh = pad(endDate.getHours());
+    const emin = pad(endDate.getMinutes());
+    const end = `${ey}${em}${ed}T${eh}${emin}00`;
+    const params = new URLSearchParams({
+      action: "TEMPLATE",
+      text: `${subject} - ${description}`,
+      dates: `${start}/${end}`,
+    });
+    return `https://calendar.google.com/calendar/render?${params.toString()}`;
+  }
+
+  // All-day event
+  const cleanDate = date.replace(/-/g, "");
+  const nextDay = new Date(startDate.getTime() + 24 * 60 * 60 * 1000);
+  const ny = nextDay.getFullYear();
+  const nm = pad(nextDay.getMonth() + 1);
+  const nd = pad(nextDay.getDate());
+  const params = new URLSearchParams({
+    action: "TEMPLATE",
+    text: `${subject} - ${description}`,
+    dates: `${cleanDate}/${ny}${nm}${nd}`,
+  });
+  return `https://calendar.google.com/calendar/render?${params.toString()}`;
+}
 
 export function SyllabusUpload() {
   const [file, setFile] = useState<File | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [ocrProgress, setOcrProgress] = useState(0);
-  const [llmProgress, setLlmProgress] = useState(0);
   const [events, setEvents] = useState<ExtractedEvent[]>([]);
-  const [rawText, setRawText] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0];
     if (selectedFile) {
-      const validImageTypes = ['image/jpeg', 'image/png', 'image/jpg', 'image/webp'];
-      if (selectedFile.type === 'application/pdf') {
-        setError('PDF files are not yet supported. Please convert your PDF to an image (JPEG, PNG) and upload that instead.');
+      const validTypes = ["image/jpeg", "image/png", "image/jpg", "image/webp", "application/pdf"];
+      if (!validTypes.includes(selectedFile.type)) {
+        setError("Please upload a valid file (JPEG, PNG, WebP, or PDF)");
         return;
       }
-      if (!validImageTypes.includes(selectedFile.type)) {
-        setError('Please upload a valid image file (JPEG, PNG, WebP)');
-        return;
-      }
-      
+
       if (selectedFile.size > 10 * 1024 * 1024) {
-        setError('File size must be less than 10MB');
+        setError("File size must be less than 10MB");
         return;
       }
 
       setFile(selectedFile);
       setError(null);
       setEvents([]);
-      setRawText("");
     }
   };
 
@@ -44,43 +85,35 @@ export function SyllabusUpload() {
     if (!file) return;
 
     setIsProcessing(true);
-    setOcrProgress(0);
-    setLlmProgress(0);
     setError(null);
 
     try {
-      // Step 1: OCR - Extract raw text
-      setOcrProgress(10);
-      const ocrData = await processSyllabusFile(file);
-      setRawText(ocrData.rawText);
-      setOcrProgress(100);
+      const formData = new FormData();
+      formData.append("file", file);
 
-      // Step 2: Send to Ollama via API route
-      setLlmProgress(10);
-      const response = await fetch('/api/ollama/process', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ rawText: ocrData.rawText }),
+      const response = await fetch("/api/syllabus/process", {
+        method: "POST",
+        body: formData,
       });
 
       if (!response.ok) {
         const errorData = await response.json();
-        throw new Error(errorData.message || 'Failed to process with Ollama');
+        throw new Error(errorData.message || "Failed to process syllabus");
       }
 
-      setLlmProgress(50);
       const data = await response.json();
-      setLlmProgress(100);
       setEvents(data.events || []);
 
       if (!data.events || data.events.length === 0) {
-        setError('No events found in the document. The LLM may not have detected any dates or events.');
+        setError("No events found in the document.");
       }
-    } catch (err: any) {
-      console.error('Processing error:', err);
-      setError(err.message || 'Failed to process file. Please try again.');
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : "Failed to process file. Please try again.";
+      console.error("Processing error:", err);
+      setError(message);
     } finally {
       setIsProcessing(false);
     }
@@ -94,21 +127,16 @@ export function SyllabusUpload() {
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    
+
     const droppedFile = e.dataTransfer.files?.[0];
     if (droppedFile) {
-      const validImageTypes = ['image/jpeg', 'image/png', 'image/jpg', 'image/webp'];
-      if (droppedFile.type === 'application/pdf') {
-        setError('PDF files are not yet supported. Please convert your PDF to an image (JPEG, PNG) and upload that instead.');
-        return;
-      }
-      if (validImageTypes.includes(droppedFile.type)) {
+      const validTypes = ["image/jpeg", "image/png", "image/jpg", "image/webp", "application/pdf"];
+      if (validTypes.includes(droppedFile.type)) {
         setFile(droppedFile);
         setError(null);
         setEvents([]);
-        setRawText("");
       } else {
-        setError('Please upload a valid image file (JPEG, PNG, WebP)');
+        setError("Please upload a valid file (JPEG, PNG, WebP, or PDF)");
       }
     }
   };
@@ -128,7 +156,7 @@ export function SyllabusUpload() {
         <input
           ref={fileInputRef}
           type="file"
-          accept="image/*"
+          accept="image/*,.pdf,application/pdf"
           onChange={handleFileSelect}
           className="hidden"
         />
@@ -164,7 +192,7 @@ export function SyllabusUpload() {
                 Choose File
               </Button>
               <p className="text-sm text-gray-500 mt-4">
-                Supports: JPEG, PNG, WebP (Max 10MB)
+                Supports: JPEG, PNG, WebP, PDF (Max 10MB)
               </p>
             </div>
           </div>
@@ -195,7 +223,6 @@ export function SyllabusUpload() {
                   onClick={() => {
                     setFile(null);
                     setEvents([]);
-                    setRawText("");
                     setError(null);
                   }}
                   variant="outline"
@@ -216,33 +243,13 @@ export function SyllabusUpload() {
         )}
       </div>
 
-      {/* Progress Bars */}
+      {/* Processing Indicator */}
       {isProcessing && (
-        <div className="space-y-4">
-          <div className="space-y-2">
-            <div className="flex justify-between text-sm text-gray-600">
-              <span>OCR Processing</span>
-              <span>{ocrProgress}%</span>
-            </div>
-            <div className="w-full bg-blue-100 rounded-full h-3 overflow-hidden">
-              <div
-                className="bg-blue-600 h-full transition-all duration-300 rounded-full"
-                style={{ width: `${ocrProgress}%` }}
-              />
-            </div>
-          </div>
-          <div className="space-y-2">
-            <div className="flex justify-between text-sm text-gray-600">
-              <span>LLM Processing (Ollama)</span>
-              <span>{llmProgress}%</span>
-            </div>
-            <div className="w-full bg-blue-100 rounded-full h-3 overflow-hidden">
-              <div
-                className="bg-blue-600 h-full transition-all duration-300 rounded-full"
-                style={{ width: `${llmProgress}%` }}
-              />
-            </div>
-          </div>
+        <div className="text-center py-4">
+          <div className="inline-block w-8 h-8 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin" />
+          <p className="text-sm text-gray-600 mt-2">
+            Analyzing syllabus with AI...
+          </p>
         </div>
       )}
 
@@ -253,26 +260,26 @@ export function SyllabusUpload() {
         </div>
       )}
 
-      {/* Raw Text Preview (Collapsible) */}
-      {rawText && (
-        <details className="bg-gray-50 border border-gray-200 rounded-xl p-4">
-          <summary className="cursor-pointer font-semibold text-gray-700 mb-2">
-            View Raw OCR Text
-          </summary>
-          <pre className="text-xs text-gray-600 whitespace-pre-wrap max-h-40 overflow-y-auto mt-2">
-            {rawText.substring(0, 1000)}{rawText.length > 1000 ? '...' : ''}
-          </pre>
-        </details>
-      )}
-
       {/* Extracted Events */}
       {events.length > 0 && (
         <div className="space-y-4">
-          <h3 className="text-2xl font-bold text-gray-900">
-            Extracted Events ({events.length})
-          </h3>
+          <div className="flex items-center justify-between">
+            <h3 className="text-2xl font-bold text-gray-900">
+              Extracted Events ({events.length})
+            </h3>
+            <Button
+              onClick={() => {
+                events.forEach((evt) => {
+                  window.open(buildGoogleCalendarUrl(evt), "_blank");
+                });
+              }}
+              className="bg-blue-600 text-white hover:bg-blue-700"
+            >
+              Add All to Google Calendar
+            </Button>
+          </div>
           <div className="space-y-3">
-            {events.map((event, index) => (
+            {events.map((evt, index) => (
               <div
                 key={index}
                 className="bg-white border border-blue-200 rounded-xl p-6 shadow-sm hover:shadow-md transition-shadow"
@@ -297,29 +304,32 @@ export function SyllabusUpload() {
                       </div>
                       <div>
                         <p className="font-bold text-gray-900">
-                          {new Date(event.date).toLocaleDateString('en-US', {
-                            weekday: 'long',
-                            year: 'numeric',
-                            month: 'long',
-                            day: 'numeric',
+                          {new Date(evt.date).toLocaleDateString("en-US", {
+                            weekday: "long",
+                            year: "numeric",
+                            month: "long",
+                            day: "numeric",
                           })}
                         </p>
-                        {event.time && (
-                          <p className="text-sm text-gray-600">{event.time}</p>
+                        {evt.time && (
+                          <p className="text-sm text-gray-600">{evt.time}</p>
                         )}
                       </div>
                     </div>
                     <div className="ml-13 space-y-1">
                       <p className="font-semibold text-gray-900">
-                        {event.description}
+                        {evt.description}
                       </p>
-                      <p className="text-sm text-blue-600">{event.subject}</p>
+                      <p className="text-sm text-blue-600">{evt.subject}</p>
                     </div>
                   </div>
                   <Button
                     variant="outline"
                     size="sm"
                     className="border-blue-200 text-blue-600 hover:bg-blue-50"
+                    onClick={() =>
+                      window.open(buildGoogleCalendarUrl(evt), "_blank")
+                    }
                   >
                     Add to Calendar
                   </Button>
