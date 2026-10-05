@@ -3,54 +3,24 @@
 import { useState, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import type { ExtractedEvent } from "@/app/utils/ocrProcessor";
+import { parseLocalDate, toGoogleEvent } from "@/app/utils/calendarEvents";
+import { requestCalendarAccessToken } from "@/app/utils/googleAuth";
 
+// Pre-filled "create event" link, used for adding a single event by hand
 function buildGoogleCalendarUrl(event: ExtractedEvent): string {
-  const { date, time, description, subject } = event;
-
-  // Build start datetime
-  let startDate: Date;
-  if (time) {
-    startDate = new Date(`${date} ${time}`);
-  } else {
-    startDate = new Date(date);
-  }
-
-  // Format as YYYYMMDD or YYYYMMDDTHHmmss
-  const pad = (n: number) => n.toString().padStart(2, "0");
-  if (time && !isNaN(startDate.getTime())) {
-    const y = startDate.getFullYear();
-    const m = pad(startDate.getMonth() + 1);
-    const d = pad(startDate.getDate());
-    const h = pad(startDate.getHours());
-    const min = pad(startDate.getMinutes());
-    const start = `${y}${m}${d}T${h}${min}00`;
-    // Default 1 hour duration
-    const endDate = new Date(startDate.getTime() + 60 * 60 * 1000);
-    const ey = endDate.getFullYear();
-    const em = pad(endDate.getMonth() + 1);
-    const ed = pad(endDate.getDate());
-    const eh = pad(endDate.getHours());
-    const emin = pad(endDate.getMinutes());
-    const end = `${ey}${em}${ed}T${eh}${emin}00`;
-    const params = new URLSearchParams({
-      action: "TEMPLATE",
-      text: `${subject} - ${description}`,
-      dates: `${start}/${end}`,
-    });
-    return `https://calendar.google.com/calendar/render?${params.toString()}`;
-  }
-
-  // All-day event
-  const cleanDate = date.replace(/-/g, "");
-  const nextDay = new Date(startDate.getTime() + 24 * 60 * 60 * 1000);
-  const ny = nextDay.getFullYear();
-  const nm = pad(nextDay.getMonth() + 1);
-  const nd = pad(nextDay.getDate());
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const googleEvent = toGoogleEvent(event, timeZone);
   const params = new URLSearchParams({
     action: "TEMPLATE",
-    text: `${subject} - ${description}`,
-    dates: `${cleanDate}/${ny}${nm}${nd}`,
+    text: `${event.subject} - ${event.description}`,
+    ctz: timeZone,
   });
+  if (googleEvent) {
+    const compact = (s: string) => s.replace(/[-:]/g, "");
+    const start = googleEvent.start.dateTime ?? googleEvent.start.date!;
+    const end = googleEvent.end.dateTime ?? googleEvent.end.date!;
+    params.set("dates", `${compact(start)}/${compact(end)}`);
+  }
   return `https://calendar.google.com/calendar/render?${params.toString()}`;
 }
 
@@ -59,6 +29,8 @@ export function SyllabusUpload() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [events, setEvents] = useState<ExtractedEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -78,6 +50,7 @@ export function SyllabusUpload() {
       setFile(selectedFile);
       setError(null);
       setEvents([]);
+      setSyncMessage(null);
     }
   };
 
@@ -116,6 +89,43 @@ export function SyllabusUpload() {
       setError(message);
     } finally {
       setIsProcessing(false);
+    }
+  };
+
+  const handleSyncToCalendar = async () => {
+    setIsSyncing(true);
+    setError(null);
+    setSyncMessage(null);
+
+    try {
+      // Opens Google's consent popup; must run directly from the click
+      const accessToken = await requestCalendarAccessToken();
+
+      const response = await fetch("/api/calendar/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          accessToken,
+          events,
+          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.message || data.error || "Failed to sync with Google Calendar");
+      }
+
+      const failedCount = data.failed?.length ?? 0;
+      setSyncMessage(
+        `Added ${data.created} event${data.created === 1 ? "" : "s"} to Google Calendar` +
+          (failedCount > 0 ? ` (${failedCount} failed)` : "")
+      );
+      if (failedCount > 0) console.warn("Events that failed to sync:", data.failed);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to sync with Google Calendar");
+    } finally {
+      setIsSyncing(false);
     }
   };
 
@@ -268,16 +278,18 @@ export function SyllabusUpload() {
               Extracted Events ({events.length})
             </h3>
             <Button
-              onClick={() => {
-                events.forEach((evt) => {
-                  window.open(buildGoogleCalendarUrl(evt), "_blank");
-                });
-              }}
+              onClick={handleSyncToCalendar}
+              disabled={isSyncing}
               className="bg-blue-600 text-white hover:bg-blue-700"
             >
-              Add All to Google Calendar
+              {isSyncing ? "Adding to Google Calendar..." : "Add All to Google Calendar"}
             </Button>
           </div>
+          {syncMessage && (
+            <div className="bg-green-50 border border-green-200 rounded-xl p-4">
+              <p className="text-green-800 text-sm">{syncMessage}</p>
+            </div>
+          )}
           <div className="space-y-3">
             {events.map((evt, index) => (
               <div
@@ -304,7 +316,7 @@ export function SyllabusUpload() {
                       </div>
                       <div>
                         <p className="font-bold text-gray-900">
-                          {new Date(evt.date).toLocaleDateString("en-US", {
+                          {(parseLocalDate(evt.date) ?? new Date(evt.date)).toLocaleDateString("en-US", {
                             weekday: "long",
                             year: "numeric",
                             month: "long",

@@ -1,40 +1,47 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { generateText } from 'ai';
-import { gateway } from 'ai';
+import { generateText, Output } from 'ai';
+import { z } from 'zod';
 import type { ExtractedEvent } from '@/app/utils/ocrProcessor';
+import { alignToWeekday } from '@/app/utils/calendarEvents';
 
-function parseCSVResponse(csvText: string): ExtractedEvent[] {
-  const lines = csvText.trim().split('\n');
-  const dataLines = lines.length > 1 ? lines.slice(1) : lines;
+const DEFAULT_MODEL = 'openai/gpt-4o';
 
-  return dataLines
-    .filter((line) => line.trim().length > 0)
-    .map((line) => {
-      const fields: string[] = [];
-      let current = '';
-      let inQuotes = false;
-      for (const char of line) {
-        if (char === '"') {
-          inQuotes = !inQuotes;
-        } else if (char === ',' && !inQuotes) {
-          fields.push(current.trim());
-          current = '';
-        } else {
-          current += char;
-        }
-      }
-      fields.push(current.trim());
+const WEEKDAY = z.enum(['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']);
 
-      const [date, time, description, subject] = fields;
-      return {
-        date: date || '',
-        time: time || undefined,
-        description: description || 'Event',
-        subject: subject || 'Unknown Subject',
-      };
-    })
-    .filter((e) => e.date.length > 0);
-}
+const syllabusSchema = z.object({
+  subject: z.string().describe('Course name or code, e.g. "Math C2210"'),
+  scheduleTable: z
+    .array(
+      z.object({
+        weekOf: z.string().describe('The date labeling this row, as YYYY-MM-DD (usually the Monday that starts the week)'),
+        cells: z.array(
+          z.object({
+            weekday: WEEKDAY.describe('The column header this cell is under'),
+            text: z.string().describe('The cell text, copied exactly'),
+            isEvent: z
+              .boolean()
+              .describe('true for exams, quizzes, reviews, due dates, holidays, no-class days, first/last day of class (also when mixed with a topic, e.g. "Instruction Begins, 1.1"); false for cells that are only lecture topics'),
+          })
+        ),
+      })
+    )
+    .describe('Every row of the weekly course schedule table, if there is one, including rows with only lecture topics. Empty array if there is no table.'),
+  otherEvents: z
+    .array(
+      z.object({
+        date: z.string().describe('YYYY-MM-DD'),
+        time: z.string().nullable().describe('Start time if stated for this event, e.g. "3:00 PM". Otherwise null.'),
+        description: z.string().describe('What the event is, e.g. "Last day to drop"'),
+      })
+    )
+    .describe('Events with a specific date written in the text outside the schedule table (deadlines, final exam date, etc.).'),
+});
+
+const prompt = `Read this syllabus and fill in the schema.
+
+- Use the year stated in the document (e.g. "Fall 2026"). All dates are YYYY-MM-DD.
+- scheduleTable: transcribe the weekly schedule table row by row and cell by cell. Keep every non-empty cell, including lecture topics like "2.4 – 2.5", under the column it actually appears in. Use the row label exactly as the date; do not add days to it.
+- otherEvents: only dates written out in the text, such as drop deadlines or "Final Exam: Tuesday, Dec 15, 2026". Do not guess dates for vague items like "due during the first week".`;
 
 export async function POST(request: NextRequest) {
   try {
@@ -53,29 +60,13 @@ export async function POST(request: NextRequest) {
     const mimeType = file.type || 'image/png';
     const isPDF = mimeType === 'application/pdf';
 
-    const prompt = `Look at this syllabus and extract all important dates, assignments, exams, and events.
-
-Return ONLY a CSV with these columns: date,time,description,subject
-- date: YYYY-MM-DD format
-- time: time if mentioned (e.g. "3:00 PM"), leave empty if not mentioned
-- description: what the event is (e.g. "Midterm Exam")
-- subject: course name or code
-
-Example:
-date,time,description,subject
-2024-01-15,3:00 PM,Midterm Exam,CS 101
-2024-02-20,,Final Project Due,CS 101
-
-If a field contains commas, wrap it in double quotes. If no subject is found, use context clues from the document.
-
-Return only the CSV, no other text.`;
-
     const fileContent = isPDF
       ? { type: 'file' as const, data: `data:${mimeType};base64,${base64}`, mediaType: mimeType }
       : { type: 'image' as const, image: `data:${mimeType};base64,${base64}` };
 
-    const { text } = await generateText({
-      model: "openai/gpt-4o",
+    const { output } = await generateText({
+      model: process.env.SYLLABUS_MODEL ?? DEFAULT_MODEL,
+      output: Output.object({ schema: syllabusSchema }),
       messages: [
         {
           role: 'user',
@@ -87,7 +78,39 @@ Return only the CSV, no other text.`;
       ],
     });
 
-    const events = parseCSVResponse(text);
+    const subject = output?.subject || 'Unknown Subject';
+    const candidates: ExtractedEvent[] = [];
+
+    // Table cells: the model copies the row label and column; code does the date math
+    for (const row of output?.scheduleTable ?? []) {
+      for (const cell of row.cells) {
+        if (!cell.isEvent || !cell.text.trim()) continue;
+        candidates.push({
+          date: alignToWeekday(row.weekOf, cell.weekday),
+          description: cell.text.trim(),
+          subject,
+        });
+      }
+    }
+    for (const e of output?.otherEvents ?? []) {
+      candidates.push({
+        date: e.date,
+        time: e.time ?? undefined,
+        description: e.description,
+        subject,
+      });
+    }
+
+    // The same event often appears in both the table and the text (e.g. the final)
+    const seen = new Set<string>();
+    const events = candidates
+      .filter((e) => {
+        const key = `${e.date}|${e.description.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .sort((a, b) => a.date.localeCompare(b.date));
 
     // TODO: re-add DB insert once auth is wired up
 
